@@ -343,7 +343,9 @@ class ReorderBuffer(
           ) === RegisterType.GPR
       ) {
         rsMeta.updatingInstructionFound := True
-        rsMeta.updatingInstructionFinished := (entry.cdbUpdated || entry.rdbUpdated)
+        rsMeta.updatingInstructionFinished := entry.registerMap.elementAs[Bool](
+          pipeline.data.RD_DATA_VALID.asInstanceOf[PipelineData[Data]]
+        )
         rsMeta.updatingInstructionIndex := index
         rsMeta.updatingInstructionValue := entry.registerMap.elementAs[UInt](
           pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]
@@ -398,11 +400,15 @@ class ReorderBuffer(
         robEntries(cdbMessage.robIndex).cdbUpdated := True
         robEntries(cdbMessage.robIndex).registerMap
           .element(pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]) := cdbMessage.writeValue
+        robEntries(cdbMessage.robIndex).registerMap
+          .element(pipeline.data.RD_DATA_VALID.asInstanceOf[PipelineData[Data]]) := True
       }
     } else {
       robEntries(cdbMessage.robIndex).cdbUpdated := True
       robEntries(cdbMessage.robIndex).registerMap
         .element(pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]) := cdbMessage.writeValue
+      robEntries(cdbMessage.robIndex).registerMap
+        .element(pipeline.data.RD_DATA_VALID.asInstanceOf[PipelineData[Data]]) := True
     }
 
     lsu.psfAddress(robEntries(cdbMessage.robIndex).registerMap) := lsu.psfAddress(
@@ -498,7 +504,9 @@ class ReorderBuffer(
       val addressesMatch = entryWordAddress === wordAddress
       val loadValue: UInt =
         entry.registerMap.elementAs[UInt](pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]])
-      val valueValid = entry.cdbUpdated
+      val valueValid = entry.registerMap.elementAs[Bool](
+        pipeline.data.RD_DATA_VALID.asInstanceOf[PipelineData[Data]]
+      )
       val isYounger = relativeIndexForAbsolute(index) > relativeIndexForAbsolute(storeIndex)
 
       val speculative = pipeline.service[LsuService].stlSpeculation(entry.registerMap)
