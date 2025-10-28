@@ -616,7 +616,17 @@ class ReorderBuffer(
       }
 
       if (config.addressBasedPsf) {
-        when(lsu.psfMisspeculation(rdbMessage.registerMap)) {
+        when(
+          lsu.psfMisspeculation(rdbMessage.registerMap) || (robEntries(
+            rdbMessage.robIndex
+          ).registerMap
+            .elementAs[Bool](
+              pipeline.data.RD_DATA_VALID.asInstanceOf[PipelineData[Data]]
+            ) && rdbMessage.registerMap.element(
+            pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]
+          ) =/= robEntries(rdbMessage.robIndex).registerMap
+            .element(pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]))
+        ) {
           psfMispredictions := psfMispredictions + 1
           addPsfPredictorEntry(
             robEntries(rdbMessage.robIndex).registerMap
@@ -644,25 +654,17 @@ class ReorderBuffer(
             psfPredictions := psfPredictions + 1
           }
         }
-      }
-
-      if (!config.addressBasedPsf) {
+      } else {
         // detect wrongly forwarded value-based PSF
         when(
           lsu.operationOfBundle(rdbMessage.registerMap) === LsuOperationType.LOAD && robEntries(
             rdbMessage.robIndex
           ).cdbUpdated
         ) {
-          val psfMismatch: Bool = if (config.addressBasedPsf) {
-            lsu.psfAddress(robEntries(rdbMessage.robIndex).registerMap) =/= lsu.addressOfBundle(
-              rdbMessage.registerMap
-            )
-          } else {
-            rdbMessage.registerMap.element(
-              pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]
-            ) =/= robEntries(rdbMessage.robIndex).registerMap
-              .element(pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]])
-          }
+          val psfMismatch: Bool = rdbMessage.registerMap.element(
+            pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]]
+          ) =/= robEntries(rdbMessage.robIndex).registerMap
+            .element(pipeline.data.RD_DATA.asInstanceOf[PipelineData[Data]])
 
           when(psfMismatch) {
             psfMispredictions := psfMispredictions + 1
