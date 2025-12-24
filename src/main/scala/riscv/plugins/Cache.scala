@@ -11,7 +11,7 @@ class Cache(
     prefetcher: Option[PrefetchService] = None,
     maxPrefetches: Int = 1,
     cacheable: (UInt => Bool) = (_ => True),
-    delay: Int = 3
+    delay: Int = 1
 )(implicit config: Config)
     extends Plugin[Pipeline] {
   private val byteIndexBits = log2Up(config.xlen / 8)
