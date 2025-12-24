@@ -199,7 +199,8 @@ class DynamicMemoryBackbone(implicit config: Config) extends MemoryBackbone with
 
         dbusFilters.zipWithIndex.foreach { case (f, i) =>
           if (i < dbusFilters.size - 1) {
-            val intermediateDBus = Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
+            val intermediateDBus =
+              Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
             f(internalWriteDBusStage, previous_level, intermediateDBus)
 
             previous_level = intermediateDBus
