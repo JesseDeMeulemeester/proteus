@@ -194,7 +194,23 @@ class DynamicMemoryBackbone(implicit config: Config) extends MemoryBackbone with
           }
       }
 
-      dbusFilter.foreach(_(internalWriteDBusStage, unifiedInternalDBus, externalDBus))
+      if (dbusFilters.nonEmpty) {
+        var previous_level = unifiedInternalDBus
+
+        dbusFilters.zipWithIndex.foreach { case (f, i) =>
+          if (i < dbusFilters.size - 1) {
+            val intermediateDBus = Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
+            f(internalWriteDBusStage, previous_level, intermediateDBus)
+
+            previous_level = intermediateDBus
+          } else {
+            f(internalWriteDBusStage, previous_level, externalDBus)
+          }
+        }
+      } else {
+        unifiedInternalDBus.payload <> externalDBus
+      }
+
       dbusObservers.foreach(_(internalWriteDBusStage, unifiedInternalDBus))
     }
   }

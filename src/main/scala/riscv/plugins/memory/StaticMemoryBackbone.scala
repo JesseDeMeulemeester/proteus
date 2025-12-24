@@ -13,7 +13,24 @@ class StaticMemoryBackbone(implicit config: Config) extends MemoryBackbone {
 
     pipeline plug new Area {
       externalDBus = master(new MemBus(config.dbusConfig)).setName("dbus")
-      dbusFilter.foreach(_(internalWriteDBusStage, internalWriteDBus, externalDBus))
+      
+      if (dbusFilters.nonEmpty) {
+        var previous_level = internalWriteDBus
+
+        dbusFilters.zipWithIndex.foreach { case (f, i) =>
+          if (i < dbusFilters.size - 1) {
+            val intermediateDBus = Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
+            f(null, previous_level, intermediateDBus)
+
+            previous_level = intermediateDBus
+          } else {
+            f(null, previous_level, externalDBus)
+          }
+        }
+      } else {
+        internalWriteDBus <> externalDBus
+      }
+
       dbusObservers.foreach(_(internalWriteDBusStage, internalWriteDBus))
     }
   }

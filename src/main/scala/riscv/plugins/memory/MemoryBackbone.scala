@@ -15,7 +15,7 @@ abstract class MemoryBackbone(implicit config: Config) extends Plugin with Memor
   var internalWriteDBus: MemBus = null
   var internalReadDBusStages: Seq[Stage] = null
   var internalWriteDBusStage: Stage = null
-  var dbusFilter: Option[MemBusFilter] = None
+  var dbusFilters = mutable.ArrayBuffer[MemBusFilter]()
   var ibusFilter: Option[MemBusFilter] = None
   val dbusObservers = mutable.ArrayBuffer[MemBusObserver]()
 
@@ -45,13 +45,6 @@ abstract class MemoryBackbone(implicit config: Config) extends Plugin with Memor
 
   override def finish(): Unit = {
     setupIBus()
-
-    // DBUS
-    if (dbusFilter.isEmpty) {
-      dbusFilter = Some((_, idbus, edbus) => {
-        idbus <> edbus
-      })
-    }
   }
 
   override def getExternalIBus: MemBus = {
@@ -80,8 +73,7 @@ abstract class MemoryBackbone(implicit config: Config) extends Plugin with Memor
   }
 
   override def filterDBus(filter: MemBusFilter): Unit = {
-    assert(dbusFilter.isEmpty)
-    dbusFilter = Some(filter)
+    dbusFilters += filter
   }
 
   override def filterIBus(filter: MemBusFilter): Unit = {
