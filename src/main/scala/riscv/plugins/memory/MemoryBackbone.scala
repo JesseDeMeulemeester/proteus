@@ -43,6 +43,32 @@ abstract class MemoryBackbone(implicit config: Config) extends Plugin with Memor
     }
   }
 
+  def setupExternalDBus(internalDBus: MemBus): Unit = {
+    pipeline plug new Area {
+      externalDBus = master(new MemBus(config.dbusConfig)).setName("dbus")
+
+      if (dbusFilters.nonEmpty) {
+        var previous_level = internalDBus
+
+        dbusFilters.zipWithIndex.foreach { case (f, i) =>
+          if (i < dbusFilters.size - 1) {
+            val intermediateDBus =
+              Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
+            f(internalWriteDBusStage, previous_level, intermediateDBus)
+
+            previous_level = intermediateDBus
+          } else {
+            f(internalWriteDBusStage, previous_level, externalDBus)
+          }
+        }
+      } else {
+        internalDBus <> externalDBus
+      }
+
+      dbusObservers.foreach(_(internalWriteDBusStage, internalDBus))
+    }
+  }
+
   override def finish(): Unit = {
     setupIBus()
   }

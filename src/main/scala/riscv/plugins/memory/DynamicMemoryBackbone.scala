@@ -9,6 +9,7 @@ import scala.collection.mutable
 class DynamicMemoryBackbone(implicit config: Config) extends MemoryBackbone with Resettable {
 
   private var activeFlush: Bool = null
+  private var unifiedInternalDBus: Stream[MemBus] = null
 
   override def build(): Unit = {
     pipeline plug new Area {
@@ -22,9 +23,7 @@ class DynamicMemoryBackbone(implicit config: Config) extends MemoryBackbone with
     super.finish()
 
     pipeline plug new Area {
-      externalDBus = master(new MemBus(config.dbusConfig)).setName("dbus")
-
-      private val unifiedInternalDBus = Stream(MemBus(config.dbusConfig))
+      unifiedInternalDBus = Stream(MemBus(config.dbusConfig))
 
       unifiedInternalDBus.cmd.valid := False
       unifiedInternalDBus.cmd.address.assignDontCare()
@@ -193,27 +192,9 @@ class DynamicMemoryBackbone(implicit config: Config) extends MemoryBackbone with
             }
           }
       }
-
-      if (dbusFilters.nonEmpty) {
-        var previous_level = unifiedInternalDBus
-
-        dbusFilters.zipWithIndex.foreach { case (f, i) =>
-          if (i < dbusFilters.size - 1) {
-            val intermediateDBus =
-              Stream(MemBus(config.dbusConfig)).setName("intermediate_dbus" + i)
-            f(internalWriteDBusStage, previous_level, intermediateDBus)
-
-            previous_level = intermediateDBus
-          } else {
-            f(internalWriteDBusStage, previous_level, externalDBus)
-          }
-        }
-      } else {
-        unifiedInternalDBus.payload <> externalDBus
-      }
-
-      dbusObservers.foreach(_(internalWriteDBusStage, unifiedInternalDBus))
     }
+
+    setupExternalDBus(unifiedInternalDBus)
   }
 
   override def createInternalDBus(
