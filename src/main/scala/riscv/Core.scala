@@ -60,7 +60,7 @@ object createStaticPipeline {
         prefetcher,
         new Cache(sets = 2, ways = 2, backbone.filterIBus, Some(prefetcher), maxPrefetches = 2),
         new Cache(sets = 8, ways = 2, backbone.filterDBus, cacheable = (_ >= 0x80000000L)),
-        // Different cache levels can be specified by adding more caches plugins. 
+        // Different cache levels can be specified by adding more cache plugins.
         // The order in which you add the caches is the order in which they will be connected:
         // new Cache(sets = 16, ways = 4, backbone.filterDBus, delay = 5),
         new CsrFile(pipeline.writeback, pipeline.writeback), // TODO: ugly
