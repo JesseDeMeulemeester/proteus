@@ -23,6 +23,11 @@ jobs:
           sudo apt-get install sbt -yqq
       - name: Install ecosystem for simple tests
         run: git clone --depth 1 --recurse-submodules --single-branch https://github.com/proteus-core/ecosystem.git
+      - name: Install SpinalCrypto
+        run: |
+          git clone https://github.com/JesseDeMeulemeester/SpinalCrypto.git
+          cd SpinalCrypto
+          sbt publishLocal
       - name: Run Scalafmt
         run: sbt scalafmtCheck
       - name: 32-bit in-order pipeline riscv-tests
