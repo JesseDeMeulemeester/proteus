@@ -39,6 +39,10 @@ class RngFifo(queueDepth: Int)(implicit config: Config) extends RngBuffer {
     rngFifo.io.flush := True
   }
 
+  def isFull(): Bool = {
+    !rngFifo.io.push.ready
+  }
+
   when(isValid()) {
     rngFifo.io.pop.ready := False
   }
@@ -284,21 +288,22 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
       }
       rngDemuxBuffer.io.push << out(rngArbiter)
 
-      // FIFO_LOWLATENCY <-> RngFifos
-      private val selectRngFifo = Reg(UInt(log2Up(nbrngbuffers) bits)) init (0)
-
-      // TODO: This will get stuck once a single queue is full. In that
-      //       case, pop.valid will never be asserted, and the counter
-      //       will never advance.
-      when(rngDemuxBuffer.io.pop.valid) {
-        selectRngFifo := selectRngFifo + 1
-      }
-
-      private val outputRngStreams = StreamDemux(rngDemuxBuffer.io.pop, selectRngFifo, nbrngbuffers)
+      // FIFO_LOWLATENCY <-> RngBuffers
+      private val selectRngBuffer = Counter(nbrngbuffers, rngDemuxBuffer.io.pop.fire)
+      private val outputRngStreams = StreamDemux(rngDemuxBuffer.io.pop, selectRngBuffer, nbrngbuffers)
+      private val rngBufferFull = Vec.fill(nbrngbuffers)(Bool)
 
       // Connect the demuxed stream to all RNG buffers
       for (i <- 0 until nbrngbuffers) {
         rngbuffers(i).connect(outputRngStreams(i))
+        rngBufferFull(i) := rngbuffers(i).isFull()
+      }
+
+      // Advance the counter when the current buffer is full to avoid stalling the RNG
+      private val currentBufferFull = rngBufferFull(selectRngBuffer)
+      private val allBuffersFull = rngBufferFull.reduceBalancedTree(_ & _)
+      when(currentBufferFull & !allBuffersFull) {
+        selectRngBuffer.increment()
       }
 
       private def initialize(): Unit = {

@@ -428,6 +428,7 @@ trait RngBuffer extends Area {
   def isValid(): Bool
   def request(): Unit
   def flush(): Unit
+  def isFull(): Bool
   def connect(inputStream: Stream[Bits]): Unit
 }
 
