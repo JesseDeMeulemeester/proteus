@@ -290,7 +290,8 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
 
       // FIFO_LOWLATENCY <-> RngBuffers
       private val selectRngBuffer = Counter(nbrngbuffers, rngDemuxBuffer.io.pop.fire)
-      private val outputRngStreams = StreamDemux(rngDemuxBuffer.io.pop, selectRngBuffer, nbrngbuffers)
+      private val outputRngStreams =
+        StreamDemux(rngDemuxBuffer.io.pop, selectRngBuffer, nbrngbuffers)
       private val rngBufferFull = Vec.fill(nbrngbuffers)(Bool)
 
       // Connect the demuxed stream to all RNG buffers
