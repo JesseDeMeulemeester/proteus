@@ -9,6 +9,5 @@ fork := true
 libraryDependencies ++= Seq(
   "com.github.spinalhdl" %% "spinalhdl-core" % spinalVersion,
   "com.github.spinalhdl" %% "spinalhdl-lib" % spinalVersion,
-  "com.github.spinalhdl" %% "spinalhdl-crypto" % "1.2.0-redaes",
   compilerPlugin("com.github.spinalhdl" %% "spinalhdl-idsl-plugin" % spinalVersion)
 )
