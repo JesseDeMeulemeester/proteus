@@ -3,17 +3,72 @@ package riscv.plugins
 import riscv._
 import spinal.core._
 import spinal.lib._
-import spinal.crypto.symmetric._
-import spinal.crypto.symmetric.aes._
 
 import scala.collection.mutable
+
+/** Unrolled Bivium stream cipher implementation
+  *
+  * This is an unrolled implementation that outputs `outputBits` per clock cycle.
+  *
+  * This SpinalHDL implementation is based on: Cassiers, Gaëtan, et al. "Randomness generation for
+  * secure hardware masking– unrolled trivium to the rescue." IACR Commun. Cryptol., 1(2):4, 2024.
+  *
+  * @param outputBits:
+  *   The number of outputbits per cycle, which is equal to the level of unrolling. Defaults to 64.
+  *
+  * The component has a `stream` output that provides the random bits. The stream is valid after
+  * initialization and a warmup period of 708 steps.
+  */
+class Bivium(outputBits: Int = 64) extends Component {
+  val io = new Bundle {
+    val key = in Bits (80 bits)
+    val iv = in Bits (80 bits)
+    val initialize = in Bool ()
+    val stream = master Stream (Bits(outputBits bits))
+  }
+
+  private val state = Vec(Bits(177 bits), outputBits + 1)
+  private val stateReg = Reg(Bits(177 bits))
+  state(0) := stateReg
+
+  private val streamOut = Bits(outputBits bits)
+
+  // At least 708 steps need to be executed before outputting the randomness.
+  private val warmedup = Timeout(scala.math.ceil(708.0 / outputBits).toInt)
+  private val initialized = Reg(Bool()) init False
+
+  io.stream.payload := streamOut
+  io.stream.valid := initialized && warmedup
+
+  when(io.initialize) {
+    stateReg := B"4'x0" ## io.iv ## B"12'x000" ## B"1'b0" ## io.key
+
+    initialized := True
+    warmedup.clear()
+  } elsewhen (!warmedup) {
+    stateReg := state(outputBits)
+  } elsewhen (io.stream.ready) {
+    stateReg := state(outputBits)
+  }
+
+  for (i <- 1 to outputBits) {
+    val t1 = state(i - 1)(65) ^ state(i - 1)(92)
+    val t2 = state(i - 1)(161) ^ state(i - 1)(176)
+
+    val bit1 = t1 ^ (state(i - 1)(90) & state(i - 1)(91)) ^ state(i - 1)(170)
+    val bit2 = t2 ^ (state(i - 1)(174) & state(i - 1)(175)) ^ state(i - 1)(68)
+
+    state(i) := state(i - 1)(175 downto 93) ## bit1 ## state(i - 1)(91 downto 0) ## bit2
+    streamOut(outputBits - i) := t1 ^ t2
+  }
+}
 
 /** A FIFO queue to buffer the RNG values.
   *
   * @param queueDepth:
   *   The size of the FIFO queue.
   */
-class RngFifo(queueDepth: Int)(implicit config: Config) extends RngBuffer {
+class RngFifo(queueDepth: Int = 2)(implicit config: Config) extends RngBuffer {
   private val rngFifo =
     new StreamFifoLowLatency(dataType = Bits(config.xlen bits), depth = queueDepth) // latency = 0
 
@@ -75,88 +130,57 @@ private class csrSeed(implicit config: Config) extends Csr {
   override def write(value: UInt): Unit = this.seedValue := value.asBits
 }
 
-/** AES core in OFB mode to generate random numbers
-  *
-  * @param aesRounds:
-  *   Optional parameter to reduce the number of rounds per AES encryption. Setting this value to
-  *   zero (default) will use the standard number of rounds.
-  */
-private class AESCore(aesRounds: Int = 0) extends Component {
-  private val AESconfig = SymmetricCryptoBlockConfig(
-    keyWidth = 128 bits,
-    blockWidth = 128 bits,
-    useEncDec = true
-  )
-
-  private val AESOFBconfig = BCMO_Std_Config(
-    keyWidth = AESconfig.keyWidth.value,
-    blockWidth = AESconfig.blockWidth.value,
-    useEncDec = true,
-    ivWidth = AESconfig.blockWidth.value
-  )
-
+private class BiviumCore(outputBits: Int = 64) extends Component {
   val io = new Bundle {
-    val core = slave(BCMO_Std_IO(AESOFBconfig))
+    val key = in Bits (80 bits)
+    val iv = in Bits (80 bits)
+    val initialize = in Bool ()
+    val stream = master Stream (Bits(outputBits bits))
   }
 
-  private val core = new AESCore_Std(128 bits, aesRounds)
-  private val chaining = OFB_Std(core.gIO, ENC_DEC, ENCRYPT)
-
-  chaining.io.core <> core.io
-  chaining.io.bcmo <> io.core
+  private val core = new Bivium(outputBits)
+  core.io.key := io.key
+  core.io.iv := io.iv
+  core.io.initialize := io.initialize
+  io.stream << core.io.stream
 }
 
 /** Pseudorandom number generator
   *
-  * Seeds are generated with AES in counter mode. The IV can be updated through CSRs.
+  * Random numbers are generated with Bivium. The key can be updated through CSRs.
   *
-  * Each component that requires random seeds (e.g., cache layer) needs to to register a RngFifo.
+  * Each component that requires random numbers needs to to register a RngFifo. This component has
+  * to be initialized after any component that registers a RngBuffer.
   *
   * ```
-  *                   (IV ## Counter)
-  *                      ___|___
-  *             Key --> |  AES  |
-  *                     |_______|
+  *                       ( IV )
+  *                      ___|____
+  *             Key --> | Bivium |
+  *                     |________|
   *                         |
   *          _______________|_______________
-  *          |         |         |         |
-  *        buffer    buffer    buffer    buffer
-  *          |_________|_________|_________|
-  *                        |
-  *                  rngDemuxBuffer
-  *                        |
-  *         _______________|_______________
-  *         |         |          |        |
-  *       RNG 0     RNG 1      RNG 2     ...
+  *          |         |          |        |
+  *        RNG 0     RNG 1      RNG 2     ...
   *
   * ```
   *
-  * @param memoryDepth:
-  *   The size of the internal RNG buffer (rngDemuxBuffer)
   * @param allowUninitializedRng:
-  *   Whether to allow the RNG to generate random using the default IV. Setting this to `false`
-  *   (default) requires the IV to be updated through the RNG Control CSR.
-  * @param aesRounds:
-  *   Optional parameter to reduce the number of rounds per AES encryption. Setting this value to
-  *   zero (default) will use the standard number of rounds.
+  *   Whether to allow the RNG to generate random using the default key. Setting this to `false`
+  *   (default) requires the key to be updated through the RNG Control CSR.
   */
-class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: Int = 0)
-    extends Plugin[Pipeline]
-    with RngService {
+class Rng(allowUninitializedRng: Boolean = false) extends Plugin[Pipeline] with RngService {
   // RNG CSR flags
   private val RNG_DISABLE = 0x1 /* If set, disable the RNG */
-  private val RNG_UPDATEIV = 0x2 /* If set, update IV using seed CSRs */
+  private val RNG_UPDATEIV = 0x2 /* If set, update key using seed CSRs */
 
   private val CSR_RNGCONTROL = 0x863
   private val CSR_SEED0 = 0x880
   private val CSR_SEED1 = 0x881
   private val CSR_SEED2 = 0x882
-  private val CSR_SEED3 = 0x883
 
   // https://numbergenerator.org/hex-code-generator#!numbers=1&length=32
-  private val INIT_IV = BigInt("A285B576DE50221962EC54E8DBD45F0B", 16)
-  private val INIT_KEY = BigInt("A221C97EC9F7CB6805FA3DB538354FC3", 16)
-  private val INIT_PT = BigInt("D98A2873E93266C824410C1CD1426C00", 16)
+  private val INIT_IV = BigInt("BC4BA40FE72CF210D226", 16)
+  private val INIT_KEY = BigInt("DBBFF2853034FA92DE3D", 16)
 
   ////////////////////////
   // RNG queue handling //
@@ -164,8 +188,7 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
 
   // lazy because pipeline is null at the time of construction.
   private lazy val component = pipeline plug new RngComponent
-  private val rngbuffers = mutable.Map[Int, RngBuffer]()
-  private var nbrngbuffers = 0;
+  private val rngbuffers = mutable.ArrayBuffer[RngBuffer]()
 
   /** Register a new RNG buffer.
     *
@@ -177,10 +200,8 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
     */
   override def registerRngBuffer[T <: RngBuffer](rngbuffer: => T): Int = {
     val pluggedRngBuffer = component.plug(rngbuffer)
-    val rngbufferindex = nbrngbuffers
-    rngbuffers(rngbufferindex) = pluggedRngBuffer
-
-    nbrngbuffers = nbrngbuffers + 1
+    val rngbufferindex = rngbuffers.length
+    rngbuffers += pluggedRngBuffer
 
     rngbufferindex
   }
@@ -191,7 +212,7 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
     *   The ID of the RNG buffer.
     */
   override def getRngBuffer(id: Int): RngIo = {
-    assert(rngbuffers.contains(id))
+    assert(id >= 0 && id < rngbuffers.length)
 
     val area = component plug new Area {
       val rngIo = master(new RngIo())
@@ -218,7 +239,6 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
     csrService.registerCsr(CSR_SEED0, new csrSeed)
     csrService.registerCsr(CSR_SEED1, new csrSeed)
     csrService.registerCsr(CSR_SEED2, new csrSeed)
-    csrService.registerCsr(CSR_SEED3, new csrSeed)
   }
 
   override def build(): Unit = {
@@ -232,170 +252,84 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
       val csrSeed0 = slave(new CsrIo)
       val csrSeed1 = slave(new CsrIo)
       val csrSeed2 = slave(new CsrIo)
-      val csrSeed3 = slave(new CsrIo)
 
       ///////////////////////////////
       // Initialization of the RNG //
       ///////////////////////////////
-      private val rngCore = new AESCore(aesRounds)
+      private val rngCore = new BiviumCore(outputBits = config.xlen)
 
       // Initial state
-      rngCore.io.core.cmd.enc := True
-      rngCore.io.core.cmd.mode := BCMO_Std_CmdMode.UPDATE
-      rngCore.io.core.cmd.valid := False
+      private val rngIV_reg = U(INIT_IV, 80 bits)
+      private val rngKey_reg = Reg(UInt(80 bits)) init (INIT_KEY)
 
-      private val rngIV_reg = Reg(UInt(128 bits)) init (INIT_IV)
-      private val rngKey_reg = U(INIT_KEY, 128 bits)
-      private val rngPt_reg = U(INIT_PT, 128 bits)
+      private val rngCoreInitialized = Reg(Bool()) init False
+      if (allowUninitializedRng) {
+        rngCoreInitialized := True
+      }
 
-      rngCore.io.core.cmd.key := rngKey_reg.asBits
-      rngCore.io.core.cmd.iv := rngIV_reg.asBits
-      rngCore.io.core.cmd.block := rngPt_reg.asBits
+      rngCore.io.key := rngKey_reg.asBits
+      rngCore.io.iv := rngIV_reg.asBits
+      rngCore.io.initialize := rngCoreInitialized.rise()
 
-      private val busy = Bool()
-
-      private val rngKeyUpdated = Reg(Bool()) init allowUninitializedRng
       private val rngDisabled = Reg(Bool()) init False
 
-      ///////////////////////////////////////
-      //            RNG Memory             //
-      ///////////////////////////////////////
+      ////////////////////////////
+      // Connecting RNG Buffers //
+      ////////////////////////////
 
-      // FIFO_buffer <-> RNG
-      val rngPerAES = rngCore.io.core.config.blockWidth >> log2Up(config.xlen)
-      val rngBuffer = Seq.fill(rngPerAES)(StreamFifo(Bits(config.xlen bits), 1))
-      val rngBufferPush = Vec(rngBuffer.map(_.io.push)) // Vec of push streams
-      val rngBufferPop = Vec(rngBuffer.map(_.io.pop)) // Vec of pop streams
+      // Connect the RNG stream from the RNG core to the RNG buffers
+      val rngStream = Stream(Bits(config.xlen bits))
+      rngStream.valid := rngCoreInitialized && rngCore.io.stream.valid
+      rngStream.payload := rngDisabled ? B(0, config.xlen bits) | rngCore.io.stream.payload
+      rngCore.io.stream.ready := rngStream.ready
 
-      val rngArbiter = StreamArbiterFactory.sequentialOrder.transactionLock.on(rngBufferPop)
+      // Select the first ready output (Round Robin)
+      val rngBufferReady = rngbuffers.map(!_.isFull()).asBits
+      val selectRngBuffer = OHToUInt(OHMasking.roundRobinNext(rngBufferReady, rngStream.fire))
 
-      // FIFO_buffer <-> FIFO_LOWLATENCY
-      val rngDemuxBuffer = new StreamFifoLowLatency(
-        dataType = Bits(config.xlen bits),
-        depth = memoryDepth
-      ) // latency = 0
-
-      for (i <- 0 until rngPerAES) {
-        rngBufferPush(i).valid := rngCore.io.core.rsp.valid & rngKeyUpdated
-
-        // When the seed generation is disabled, replace all seeds with 0.
-        when(rngDisabled) {
-          rngBufferPush(i).payload := B(0, config.xlen bits)
-        } otherwise {
-          rngBufferPush(i).payload := rngCore.io.core.rsp
-            .block((config.xlen * i).toInt, config.xlen bits)
-        }
-      }
-      rngDemuxBuffer.io.push << out(rngArbiter)
-
-      // FIFO_LOWLATENCY <-> RngBuffers
-      private val selectRngBuffer = Counter(nbrngbuffers, rngDemuxBuffer.io.pop.fire)
-      private val outputRngStreams =
-        StreamDemux(rngDemuxBuffer.io.pop, selectRngBuffer, nbrngbuffers)
-      private val rngBufferFull = Vec.fill(nbrngbuffers)(Bool)
-
-      // Connect the demuxed stream to all RNG buffers
-      for (i <- 0 until nbrngbuffers) {
-        rngbuffers(i).connect(outputRngStreams(i))
-        rngBufferFull(i) := rngbuffers(i).isFull()
+      // Demux the RNG stream to the RNG buffers
+      val outputRngStreams = StreamDemux(rngStream, selectRngBuffer, rngbuffers.length)
+      rngbuffers.zip(outputRngStreams).foreach { case (buf, stream) =>
+        buf.connect(stream)
       }
 
-      // Advance the counter when the current buffer is full to avoid stalling the RNG
-      private val currentBufferFull = rngBufferFull(selectRngBuffer)
-      private val allBuffersFull = rngBufferFull.reduceBalancedTree(_ & _)
-      when(currentBufferFull & !allBuffersFull) {
-        selectRngBuffer.increment()
-      }
+      ////////////////////////
+      // Updating key logic //
+      ////////////////////////
 
-      private def initialize(): Unit = {
-        rngDemuxBuffer.io.flush := True
-        for (i <- 0 until rngPerAES) {
-          rngBuffer(i).io.flush := True
-        }
-        rngCore.io.core.cmd.mode := BCMO_Std_CmdMode.INIT
-        rngCore.io.core.cmd.valid := True
-      }
-
-      val rngBufferCanAcceptVec = Vec(Bool(), rngPerAES)
-
-      rngDemuxBuffer.io.flush := False
-      for (i <- 0 until rngPerAES) {
-        rngBuffer(i).io.flush := False
-        rngBufferCanAcceptVec(i) := (rngBuffer(i).io.occupancy === 0)
-      }
-
-      /** Whether the previous ciphertext has been consumed and we can start a new encryption.
+      /** Update the key of the Bivium RNG.
         *
-        * @return
-        *   Whether the previous value has been consumed
-        *
-        * @todo:
-        *   This wastes 4 cycles by waiting for the `rngDemuxBuffer` to consume the values, causing
-        *   the AES core to stall.
+        * The new key will be taken from the CSR registers.
         */
-      private def canStartEncryption(): Bool = {
-        rngBufferCanAcceptVec.reduce(_ & _) && rngKeyUpdated
-      }
-
-      private def RNGEncrypt(): Unit = {
-        rngCore.io.core.cmd.valid := True
-        when(rngCore.io.core.cmd.ready) {
-          rngCore.io.core.cmd.valid := False
-        }
-      }
-
-      busy := rngCore.io.core.cmd.valid
-
-      // TODO: Also check whether we're updating the seed?
-      when(canStartEncryption()) {
-        RNGEncrypt()
-      }
-
-      /////////////////////////
-      // Updating seed logic //
-      /////////////////////////
-
-      /** Update the seed (i.e., the IV) of the AES engine.
-        *
-        * The new seed will be taken from the CSR registers.
-        */
-      private def updateSeed(): Unit = {
-        rngIV_reg := (U(0, 96 bits) @@ csrSeed0.read()) |
+      private def updateKey(): Unit = {
+        rngKey_reg := ((U(0, 48 bits) @@ csrSeed0.read()) |
           (csrSeed1.read() << 32).resized |
-          (csrSeed2.read() << 64).resized |
-          (csrSeed3.read() << 96).resized
+          (csrSeed2.read()(16 downto 0) << 64).resized)
 
-        // Flush the internal RNG demux buffer and any connected RngBuffers to
-        // discard stale seeds generated using the old seed
-        rngDemuxBuffer.io.flush := True
-        for (i <- 0 until nbrngbuffers) {
+        // Flush any connected RngBuffers to discard stale rngs generated
+        // using the old key
+        for (i <- 0 until rngbuffers.length) {
           rngbuffers(i).flush()
         }
 
-        rngCore.io.core.cmd.mode := BCMO_Std_CmdMode.INIT
-        rngCore.io.core.cmd.valid := True
-        rngKeyUpdated := True
+        rngCoreInitialized := True
       }
 
-      // Update IV (from CSR registers)
-      when((csrRngControl.read() & RNG_UPDATEIV) =/= 0) {
-        updateSeed()
-
-        // Reset bit in CSR
-        csrRngControl.write(csrRngControl.read() & ~U(RNG_UPDATEIV, 32 bits))
+      // Update the Bivium key from the CSR registers. The key can only be
+      // initialized once.
+      when((csrRngControl.read() & RNG_UPDATEIV) =/= 0 && !rngCoreInitialized) {
+        updateKey()
       }
 
-      // Disable the seed generation. All seeds will be replaced with all 0s.
+      // Disable the rng generation. All outputs will be replaced with all 0s.
       private def disableRNG(): Unit = {
         rngDisabled := True
       }
 
-      // Disable RNG (from CSR registers)
+      // Disable RNG through the CSR register. The RNG cannot currently be
+      // re-enabled after disabling.
       when((csrRngControl.read() & RNG_DISABLE) =/= 0) {
         disableRNG()
-
-        // Reset bit in CSR
-        csrRngControl.write(csrRngControl.read() & ~U(RNG_DISABLE, 32 bits))
       }
     }
 
@@ -407,7 +341,6 @@ class Rng(memoryDepth: Int, allowUninitializedRng: Boolean = false, aesRounds: I
       componentArea.csrSeed0 <> csrService.getCsr(CSR_SEED0)
       componentArea.csrSeed1 <> csrService.getCsr(CSR_SEED1)
       componentArea.csrSeed2 <> csrService.getCsr(CSR_SEED2)
-      componentArea.csrSeed3 <> csrService.getCsr(CSR_SEED3)
     }
   }
 }
